@@ -1,11 +1,18 @@
 import os
+import socket
 import subprocess
+import time
+import shutil
+from collections import deque
 from urllib.parse import urlparse, urlunparse, quote
 from flask import Flask, render_template, request, jsonify
 
 app = Flask(__name__, template_folder="templates")
 
 TARGET_DIR = "/home/coder/documentation-dev"
+HUGO_PORT = 1313
+HUGO_LOG = "/home/coder/hugo-server.log"
+BASE_URL = "http://preview.localhost/"
 
 def build_auth_url(repo_url: str, username: str, password: str) -> str:
     parsed = urlparse(repo_url)
@@ -23,6 +30,37 @@ def ensure_clean_target(target_dir: str):
     if os.path.isdir(target_dir) and not os.listdir(target_dir):
         return
     raise RuntimeError(f"Target directory '{target_dir}' is not empty")
+
+def is_port_open(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        try:
+            s.connect((host, port))
+            return True
+        except Exception:
+            return False
+
+def tail_file(path: str, n: int = 200) -> str:
+    if not os.path.isfile(path):
+        return ""
+    dq = deque(maxlen=n)
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            dq.append(line.rstrip("\n"))
+    return "\n".join(dq)
+
+def prepare_hugo_modules():
+    """Clean and resolve Hugo modules before server start."""
+    # Clear Hugo module/cache to avoid stale artifacts from older Hugo
+    cache_dir = os.path.expanduser("~/.cache/hugo_cache")
+    try:
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    except Exception:
+        pass
+    # Resolve modules
+    subprocess.run(["hugo", "mod", "tidy"], cwd=TARGET_DIR, check=False, capture_output=True, text=True, timeout=120)
+    subprocess.run(["hugo", "mod", "graph"], cwd=TARGET_DIR, check=False, capture_output=True, text=True, timeout=120)
 
 @app.get("/")
 def index():
@@ -42,10 +80,83 @@ def clone_repo():
     try:
         ensure_clean_target(TARGET_DIR)
         auth_url = build_auth_url(repo_url, username, password)
-        cmd = ["git", "clone", "--depth", "1", auth_url, TARGET_DIR]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(["git", "clone", "--depth", "1", auth_url, TARGET_DIR],
+                              capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             return jsonify({"ok": False, "error": "git clone failed", "stderr": proc.stderr}), 400
         return jsonify({"ok": True, "message": "Repository cloned successfully"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.get("/status")
+def status():
+    info = {
+        "target_exists": os.path.isdir(TARGET_DIR),
+        "marker_exists": os.path.isfile(os.path.join(TARGET_DIR, "hugo.yaml")),
+        "port_1313_open": is_port_open("127.0.0.1", HUGO_PORT),
+        "hugo_path": shutil.which("hugo"),
+        "hugo_version": None,
+        "target_listing": None,
+        "log_path": HUGO_LOG,
+        "log_tail": tail_file(HUGO_LOG, 50)
+    }
+    try:
+        out = subprocess.run(["hugo", "version"], capture_output=True, text=True, timeout=10)
+        info["hugo_version"] = out.stdout.strip() or out.stderr.strip()
+    except Exception as e:
+        info["hugo_version"] = f"error: {e}"
+    try:
+        if os.path.isdir(TARGET_DIR):
+            info["target_listing"] = "\n".join(sorted(os.listdir(TARGET_DIR))[:200])
+    except Exception as e:
+        info["target_listing"] = f"error: {e}"
+    return jsonify({"ok": True, "status": info})
+
+@app.get("/logs")
+def logs():
+    tail = request.args.get("tail", "200")
+    try:
+        n = max(1, min(5000, int(tail)))
+    except Exception:
+        n = 200
+    content = tail_file(HUGO_LOG, n)
+    if not content:
+        return jsonify({"ok": False, "error": "Log file not found or empty", "path": HUGO_LOG}), 404
+    return jsonify({"ok": True, "path": HUGO_LOG, "lines": n, "log": content})
+
+@app.post("/start-preview")
+def start_preview():
+    debug = {
+        "target_dir": TARGET_DIR,
+        "marker": os.path.join(TARGET_DIR, "hugo.yaml"),
+    }
+    try:
+        if not os.path.isfile(debug["marker"]):
+            return jsonify({"ok": False, "error": "No cloned repository detected", "debug": debug}), 400
+
+        # If something is already listening on 1313, assume preview running
+        if is_port_open("127.0.0.1", HUGO_PORT):
+            return jsonify({"ok": True, "message": "Hugo preview already running"})
+
+        # Prepare modules (cleans cache + resolves)
+        prepare_hugo_modules()
+
+        # Start Hugo
+        os.makedirs(os.path.dirname(HUGO_LOG), exist_ok=True)
+        with open(HUGO_LOG, "a") as logf:
+            proc = subprocess.Popen(
+                ["hugo", "server", "-D", "--bind", "0.0.0.0", "--port", str(HUGO_PORT), "--baseURL", BASE_URL],
+                cwd=TARGET_DIR,
+                stdout=logf,
+                stderr=logf,
+                preexec_fn=os.setsid
+            )
+
+        # Wait up to ~10s for the port to open
+        for _ in range(20):
+            time.sleep(0.5)
+            if is_port_open("127.0.0.1", HUGO_PORT):
+                return jsonify({"ok": True, "message": "Hugo preview started"})
+        return jsonify({"ok": False, "error": "Failed to start Hugo preview", "log_tail": tail_file(HUGO_LOG, 200)}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "log_tail": tail_file(HUGO_LOG, 200)}), 500

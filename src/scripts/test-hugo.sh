@@ -1,40 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Configuration
 TARGET_DIR="/home/coder/documentation-dev"
 MARKER_FILE="hugo.yaml"
 HUGO_PORT="1313"
 LOG_FILE="/var/log/hugo-server.log"
 LOCK_FILE="/tmp/hugo_server_started"
+BASE_URL="http://preview.localhost/"
 
-# Helper: is process listening on port?
-is_port_busy() {
-  ss -lnt 2>/dev/null | awk '{print $4}' | grep -q ":${HUGO_PORT}$"
+# Wait until a TCP port is actually listening
+wait_for_port() {
+  local port="$1" tries=30
+  for _ in $(seq 1 $tries); do
+    if ss -lnt | awk '{print $4}' | grep -q ":${port}\$"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
-# If already started once, quit quickly
+# If we already started Hugo before, exit quickly
 if [[ -f "$LOCK_FILE" ]]; then
   exit 0
 fi
 
-# Poll every second until the marker file appears
+echo "[watcher] Starting; waiting for ${TARGET_DIR}/${MARKER_FILE} ..." >&2
+
+# Poll every second for the marker file
 while true; do
   if [[ -f "${TARGET_DIR}/${MARKER_FILE}" ]]; then
-    # Ensure hugo not already running
-    if ! is_port_busy; then
-      # Start Hugo as 'coder' user, bound to 0.0.0.0 so Traefik can route to it
-      nohup runuser -u coder -- bash -lc "cd '${TARGET_DIR}' && hugo server -D --bind 0.0.0.0 --port ${HUGO_PORT}" \
-        >> "${LOG_FILE}" 2>&1 &
+    echo "[watcher] Found ${MARKER_FILE}; launching Hugo ..." >&2
 
-      # Mark as started
+    # Start Hugo as 'coder', bind to 0.0.0.0 so Traefik can reach it
+    # NOTE: --baseURL is optional but recommended for correct links.
+    nohup runuser -u coder -- bash -lc \
+      "cd '${TARGET_DIR}' && hugo server -D --bind 0.0.0.0 --port ${HUGO_PORT} --baseURL '${BASE_URL}'" \
+      >> "${LOG_FILE}" 2>&1 &
+
+    # Confirm the port is up before stopping cron
+    if wait_for_port "${HUGO_PORT}"; then
+      echo "[watcher] Hugo is listening on :${HUGO_PORT}. Stopping cron." >&2
       touch "${LOCK_FILE}"
-
-      # Stop cron as requested (no further per-second checks needed)
       service cron stop || true
+      exit 0
+    else
+      echo '[watcher] Hugo failed to start within timeout. Will retry.' >&2
+      # If Hugo failed immediately, loop will continue and retry
     fi
-    exit 0
   fi
-
   sleep 1
 done

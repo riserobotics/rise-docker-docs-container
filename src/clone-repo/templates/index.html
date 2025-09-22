@@ -30,13 +30,30 @@
 
     <button id="cloneBtn">Clone repository</button>
 
+    <hr />
+
+    <h2>Start Hugo preview</h2>
+    <p>Starts <code>hugo server</code> in <code>/home/coder/documentation-dev</code> (requires <code>hugo.yaml</code>).</p>
+    <button id="previewBtn">Start Hugo preview</button>
+
     <div id="msg"></div>
   </div>
 
   <script>
-    const btn = document.getElementById('cloneBtn');
     const msg = document.getElementById('msg');
-    btn.addEventListener('click', async () => {
+
+    async function safeJsonFetch(url, options) {
+      const res = await fetch(url, options);
+      const text = await res.text(); // erst Text lesen
+      try {
+        return { ok: res.ok, status: res.status, data: JSON.parse(text) };
+      } catch {
+        // Fallback, wenn Server keine JSON-Antwort liefert
+        return { ok: res.ok, status: res.status, data: { ok: false, error: text || res.statusText } };
+      }
+    }
+
+    document.getElementById('cloneBtn').addEventListener('click', async () => {
       msg.textContent = 'Cloning… please wait.'; msg.className = '';
       const payload = {
         repo_url: document.getElementById('repo').value.trim(),
@@ -44,15 +61,36 @@
         password: document.getElementById('pass').value
       };
       try {
-        const res = await fetch('/clone', {
+        const res = await safeJsonFetch('/clone', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload)
         });
-        const data = await res.json();
+        const data = res.data;
         if (data.ok) { msg.textContent = data.message || 'Done.'; msg.className = 'ok'; }
         else { msg.textContent = (data.error || 'Clone failed') + (data.stderr ? "\n" + data.stderr : ""); msg.className = 'err'; }
-      } catch (e) { msg.textContent = 'Network error: ' + (e && e.message ? e.message : e); msg.className = 'err'; }
+      } catch (e) {
+        msg.textContent = 'Network error: ' + (e && e.message ? e.message : e);
+        msg.className = 'err';
+      }
+    });
+
+    document.getElementById('previewBtn').addEventListener('click', async () => {
+      msg.textContent = 'Starting Hugo preview…'; msg.className = '';
+      try {
+        const res = await safeJsonFetch('/start-preview', { method: 'POST' });
+        const data = res.data;
+        if (data.ok) {
+          msg.textContent = data.message || 'Preview started. Open http://preview.localhost';
+          msg.className = 'ok';
+        } else {
+          msg.textContent = data.error || 'Failed to start preview';
+          msg.className = 'err';
+        }
+      } catch (e) {
+        msg.textContent = 'Network error: ' + (e && e.message ? e.message : e);
+        msg.className = 'err';
+      }
     });
   </script>
 </body>
