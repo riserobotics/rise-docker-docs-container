@@ -1,0 +1,9 @@
+services:
+  rise-docker-docs-container:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rise-docker-docs-container
+    ports:
+      - "80:80"     # Host port mapping (no manual CLI flag needed)
+    restart: unless-stopped

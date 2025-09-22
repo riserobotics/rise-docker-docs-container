@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Setup – Clone Repository</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; }
+    input { width: 100%; padding: 0.6rem; border: 1px solid #8883; border-radius: 6px; }
+    button { margin-top: 1rem; padding: 0.7rem 1rem; border: 0; border-radius: 6px; cursor: pointer; }
+    .row { max-width: 560px; }
+    .ok { color: #0a0; margin-top: 1rem; }
+    .err { color: #c00; margin-top: 1rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <h1>Clone Repository into <code>/home/coder/documentation-dev</code></h1>
+
+    <label for="repo">Repository-URL:</label>
+    <input id="repo" type="url" placeholder="https://git.example.com/group/project.git" required />
+
+    <label for="user">TUB-Username:</label>
+    <input id="user" type="text" autocomplete="username" required />
+
+    <label for="pass">TUB-Password:</label>
+    <input id="pass" type="password" autocomplete="current-password" required />
+
+    <button id="cloneBtn">Clone repository</button>
+
+    <div id="msg"></div>
+  </div>
+
+  <script>
+    const btn = document.getElementById('cloneBtn');
+    const msg = document.getElementById('msg');
+    btn.addEventListener('click', async () => {
+      msg.textContent = 'Cloning… please wait.'; msg.className = '';
+      const payload = {
+        repo_url: document.getElementById('repo').value.trim(),
+        username: document.getElementById('user').value.trim(),
+        password: document.getElementById('pass').value
+      };
+      try {
+        const res = await fetch('/clone', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.ok) { msg.textContent = data.message || 'Done.'; msg.className = 'ok'; }
+        else { msg.textContent = (data.error || 'Clone failed') + (data.stderr ? "\n" + data.stderr : ""); msg.className = 'err'; }
+      } catch (e) { msg.textContent = 'Network error: ' + (e && e.message ? e.message : e); msg.className = 'err'; }
+    });
+  </script>
+</body>
+</html>
