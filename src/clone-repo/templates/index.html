@@ -25,7 +25,10 @@
     <label for="user">TUB-Username:</label>
     <input id="user" type="text" autocomplete="username" required />
 
-    <label for="pass">TUB-Password:</label>
+    <label for="email">Git Email:</label>
+    <input id="email" type="email" placeholder="you@example.com" autocomplete="email" required />
+
+    <label for="pass">TUB-Password / Token:</label>
     <input id="pass" type="password" autocomplete="current-password" required />
 
     <button id="cloneBtn">Clone repository</button>
@@ -37,6 +40,10 @@
     <button id="previewBtn">Start Hugo preview</button>
 
     <div id="msg"></div>
+    <p>
+      <a href="/status" target="_blank">View status</a> ·
+      <a href="/logs?tail=200" target="_blank">View Hugo logs</a>
+    </p>
   </div>
 
   <script>
@@ -44,13 +51,9 @@
 
     async function safeJsonFetch(url, options) {
       const res = await fetch(url, options);
-      const text = await res.text(); // erst Text lesen
-      try {
-        return { ok: res.ok, status: res.status, data: JSON.parse(text) };
-      } catch {
-        // Fallback, wenn Server keine JSON-Antwort liefert
-        return { ok: res.ok, status: res.status, data: { ok: false, error: text || res.statusText } };
-      }
+      const text = await res.text();
+      try { return { ok: res.ok, status: res.status, data: JSON.parse(text) }; }
+      catch { return { ok: res.ok, status: res.status, data: { ok: false, error: text || res.statusText } }; }
     }
 
     document.getElementById('cloneBtn').addEventListener('click', async () => {
@@ -58,6 +61,7 @@
       const payload = {
         repo_url: document.getElementById('repo').value.trim(),
         username: document.getElementById('user').value.trim(),
+        email:    document.getElementById('email').value.trim(),
         password: document.getElementById('pass').value
       };
       try {
@@ -80,13 +84,8 @@
       try {
         const res = await safeJsonFetch('/start-preview', { method: 'POST' });
         const data = res.data;
-        if (data.ok) {
-          msg.textContent = data.message || 'Preview started. Open http://preview.localhost';
-          msg.className = 'ok';
-        } else {
-          msg.textContent = data.error || 'Failed to start preview';
-          msg.className = 'err';
-        }
+        if (data.ok) { msg.textContent = data.message || 'Preview started. Open http://preview.localhost'; msg.className = 'ok'; }
+        else { msg.textContent = data.error || 'Failed to start preview'; msg.className = 'err'; }
       } catch (e) {
         msg.textContent = 'Network error: ' + (e && e.message ? e.message : e);
         msg.className = 'err';

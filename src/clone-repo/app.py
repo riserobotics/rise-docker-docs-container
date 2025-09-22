@@ -51,14 +51,12 @@ def tail_file(path: str, n: int = 200) -> str:
 
 def prepare_hugo_modules():
     """Clean and resolve Hugo modules before server start."""
-    # Clear Hugo module/cache to avoid stale artifacts from older Hugo
     cache_dir = os.path.expanduser("~/.cache/hugo_cache")
     try:
         if os.path.isdir(cache_dir):
             shutil.rmtree(cache_dir, ignore_errors=True)
     except Exception:
         pass
-    # Resolve modules
     subprocess.run(["hugo", "mod", "tidy"], cwd=TARGET_DIR, check=False, capture_output=True, text=True, timeout=120)
     subprocess.run(["hugo", "mod", "graph"], cwd=TARGET_DIR, check=False, capture_output=True, text=True, timeout=120)
 
@@ -72,19 +70,51 @@ def clone_repo():
     repo_url = (data.get("repo_url") or "").strip()
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
+    email    = (data.get("email")    or "").strip()
+
     if not repo_url:
         return jsonify({"ok": False, "error": "Repository URL is required"}), 400
     if not username or not password:
         return jsonify({"ok": False, "error": "Username and password are required"}), 400
+    if not email:
+        return jsonify({"ok": False, "error": "Email is required"}), 400
 
     try:
         ensure_clean_target(TARGET_DIR)
+
+        # Klonen mit temporär eingebetteten Credentials
         auth_url = build_auth_url(repo_url, username, password)
-        proc = subprocess.run(["git", "clone", "--depth", "1", auth_url, TARGET_DIR],
-                              capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(
+            ["git", "clone", auth_url, TARGET_DIR],
+            capture_output=True, text=True, timeout=900
+        )
         if proc.returncode != 0:
             return jsonify({"ok": False, "error": "git clone failed", "stderr": proc.stderr}), 400
-        return jsonify({"ok": True, "message": "Repository cloned successfully"})
+
+        # Remote-URL sofort auf credential-freie URL zurücksetzen (keine Secrets in .git/config)
+        subprocess.run(["git", "-C", TARGET_DIR, "remote", "set-url", "origin", repo_url],
+                       capture_output=True, text=True, timeout=30)
+
+        # user.name / user.email auf Repo-Ebene setzen (lokal)
+        set_name  = subprocess.run(["git", "-C", TARGET_DIR, "config", "user.name", username],
+                                   capture_output=True, text=True, timeout=20)
+        set_email = subprocess.run(["git", "-C", TARGET_DIR, "config", "user.email", email],
+                                   capture_output=True, text=True, timeout=20)
+        if set_name.returncode != 0 or set_email.returncode != 0:
+            return jsonify({
+                "ok": False,
+                "error": "Failed to configure git user.name or user.email",
+                "stderr_name": set_name.stderr,
+                "stderr_email": set_email.stderr
+            }), 400
+
+        # origin/HEAD korrekt setzen und Refs synchronisieren
+        subprocess.run(["git", "-C", TARGET_DIR, "remote", "set-head", "origin", "-a"],
+                       capture_output=True, text=True, timeout=30)
+        subprocess.run(["git", "-C", TARGET_DIR, "fetch", "origin", "--prune"],
+                       capture_output=True, text=True, timeout=120)
+
+        return jsonify({"ok": True, "message": "Repository cloned and git user configured"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
@@ -134,17 +164,14 @@ def start_preview():
         if not os.path.isfile(debug["marker"]):
             return jsonify({"ok": False, "error": "No cloned repository detected", "debug": debug}), 400
 
-        # If something is already listening on 1313, assume preview running
         if is_port_open("127.0.0.1", HUGO_PORT):
             return jsonify({"ok": True, "message": "Hugo preview already running"})
 
-        # Prepare modules (cleans cache + resolves)
         prepare_hugo_modules()
 
-        # Start Hugo
         os.makedirs(os.path.dirname(HUGO_LOG), exist_ok=True)
         with open(HUGO_LOG, "a") as logf:
-            proc = subprocess.Popen(
+            subprocess.Popen(
                 ["hugo", "server", "-D", "--bind", "0.0.0.0", "--port", str(HUGO_PORT), "--baseURL", BASE_URL],
                 cwd=TARGET_DIR,
                 stdout=logf,
@@ -152,8 +179,7 @@ def start_preview():
                 preexec_fn=os.setsid
             )
 
-        # Wait up to ~10s for the port to open
-        for _ in range(20):
+        for _ in range(20):  # ~10s
             time.sleep(0.5)
             if is_port_open("127.0.0.1", HUGO_PORT):
                 return jsonify({"ok": True, "message": "Hugo preview started"})
