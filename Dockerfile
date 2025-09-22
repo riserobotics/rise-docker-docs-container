@@ -13,9 +13,9 @@ RUN apt-get update && \
       ca-certificates curl wget git unzip \
       tini dumb-init gnupg tar xz-utils \
       adduser sudo procps \
-      python3 python3-pip python3-venv && \
-    apt-get install -y --no-install-recommends \
-      hugo && \
+      python3 python3-pip python3-venv \
+      cron && \
+    apt-get install -y --no-install-recommends hugo && \
     rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------
@@ -49,15 +49,15 @@ EOF
 RUN chown -R coder:coder /home/coder/.local
 
 # ------------------------------------------------------------
-# Clone-Repo web app (Flask) on 8081 → setup.localhost
+# Flask clone-repo app (serves on 8081 → setup.localhost)
 # ------------------------------------------------------------
 WORKDIR /opt/clone-repo
 
-# Create and activate virtualenv for Python deps (avoids PEP 668 issues)
+# Use venv to avoid PEP 668 issues
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# Install deps into venv
+# Dependencies
 COPY src/clone-repo/requirements.txt /opt/clone-repo/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /opt/clone-repo/requirements.txt
@@ -67,7 +67,20 @@ COPY src/clone-repo/ /opt/clone-repo/
 RUN chown -R coder:coder /opt/clone-repo
 
 # ------------------------------------------------------------
-# Traefik (as reverse proxy for dev.localhost + setup.localhost)
+# Cron watcher script (runs every second via a loop; started by cron at boot)
+# ------------------------------------------------------------
+# Copy the script placed in your repo at src/scripts/test-hugo.sh
+COPY src/scripts/test-hugo.sh /usr/local/bin/test-hugo.sh
+RUN chmod +x /usr/local/bin/test-hugo.sh
+
+# Install a root crontab that launches the watcher on container start
+# We use @reboot to start a long-running loop that checks every second.
+RUN printf '@reboot /usr/local/bin/test-hugo.sh >> /var/log/test-hugo.log 2>&1\n' > /etc/cron.d/hugo-watcher && \
+    chmod 0644 /etc/cron.d/hugo-watcher && \
+    crontab /etc/cron.d/hugo-watcher
+
+# ------------------------------------------------------------
+# Traefik (reverse proxy for dev/setup/preview hosts)
 # ------------------------------------------------------------
 ARG TRAEFIK_VERSION=v3.1.5
 RUN mkdir -p /usr/local/bin /etc/traefik /etc/traefik/dynamic
@@ -91,8 +104,9 @@ api:
 EOF
 
 # Dynamic routes:
-# - dev.localhost   → code-server (http://127.0.0.1:8080)
-# - setup.localhost → Flask app  (http://127.0.0.1:8081)
+# - dev.localhost     → code-server (http://127.0.0.1:8080)
+# - setup.localhost   → Flask app  (http://127.0.0.1:8081)
+# - preview.localhost → Hugo       (http://127.0.0.1:1313)
 RUN cat <<'EOF' > /etc/traefik/dynamic/dev.yml
 http:
   routers:
@@ -104,6 +118,10 @@ http:
       rule: "Host(`setup.localhost`)"
       entryPoints: ["web"]
       service: "setup"
+    preview:
+      rule: "Host(`preview.localhost`)"
+      entryPoints: ["web"]
+      service: "preview"
   services:
     code:
       loadBalancer:
@@ -113,10 +131,14 @@ http:
       loadBalancer:
         servers:
           - url: "http://127.0.0.1:8081"
+    preview:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:1313"
 EOF
 
 # ------------------------------------------------------------
-# Startup script: Traefik (80), code-server (8080), Flask app (8081 via venv)
+# Startup script: Traefik (80), code-server (8080), Flask app (8081), cron
 # ------------------------------------------------------------
 RUN cat <<'EOS' > /usr/local/bin/start.sh
 #!/usr/bin/env bash
@@ -126,11 +148,11 @@ set -euo pipefail
 mkdir -p /home/coder/documentation-dev
 chown -R coder:coder /home/coder
 
-# 1) Traefik (root for port 80)
+# 1) Start Traefik (port 80)
 traefik --configFile=/etc/traefik/traefik.yml &
 TRAEFIK_PID=$!
 
-# 2) code-server on 8080
+# 2) Start code-server (8080)
 sudo -u coder -H /usr/bin/code-server \
   --bind-addr 0.0.0.0:8080 \
   --auth none \
@@ -138,11 +160,15 @@ sudo -u coder -H /usr/bin/code-server \
   /home/coder/documentation-dev &
 CODE_PID=$!
 
-# 3) Flask app on 8081 (use venv)
+# 3) Start Flask app (8081) via venv
 sudo -u coder -H bash -lc '/opt/venv/bin/python -m flask --app /opt/clone-repo/app:app run --host=0.0.0.0 --port=8081' &
 FLASK_PID=$!
 
-trap "kill -TERM $TRAEFIK_PID $CODE_PID $FLASK_PID 2>/dev/null || true" TERM INT
+# 4) Start cron (which launches the per-second watcher at boot)
+cron
+# keep cron running in background; the test-hugo.sh will stop cron once hugo starts
+
+trap "kill -TERM $TRAEFIK_PID $CODE_PID $FLASK_PID 2>/dev/null || true; service cron stop || true" TERM INT
 wait -n $TRAEFIK_PID $CODE_PID $FLASK_PID
 EOS
 RUN chmod +x /usr/local/bin/start.sh
