@@ -1,2 +1,3 @@
 # Documentation Docker Container!
-For a convienient process of writing RISE documentation on gitlab pages using Hugo, all bundeled into a docker image!
+
+This repository contains the source code of a docker image that can be used to do convienient documentation of all RISE documentation repositories. 
